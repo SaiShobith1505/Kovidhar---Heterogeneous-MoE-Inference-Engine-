@@ -1,0 +1,35 @@
+# Compiled C++ Build files
+build/
+bin/
+lib/
+x64/
+
+# Executables and DLLs
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Model Tensors and Cache
+*.bin
+npu_cache/
+models/
+
+# Local benchmark outputs
+*.json
+profiling_report.txt
+test_write.txt
