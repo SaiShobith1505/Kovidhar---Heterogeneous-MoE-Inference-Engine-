@@ -3,7 +3,9 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <list>
+#include <vector>
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
@@ -22,6 +24,52 @@ struct ExpertEntry {
         : expert_id(id), filepath(std::move(path)) {}
 };
 
+struct ExpertStats {
+    uint32_t access_count = 0;
+    uint64_t last_access_time = 0;
+    std::vector<uint64_t> access_history; // For LRU-K
+};
+
+enum class CachePolicyType {
+    LRU,
+    LRUK,
+    ARC,
+    HYBRID
+};
+
+// Global cache optimization settings
+inline std::atomic<CachePolicyType> g_cache_policy{CachePolicyType::LRU};
+inline std::atomic<double> g_hotset_ratio{0.0}; // 0.0 = disabled, e.g. 0.2 = 20% of cache size
+
+// Phase 6: Prefetch Timeline Event Logging
+struct PrefetchEvent {
+    uint32_t token_index;
+    uint32_t layer_id;
+    uint32_t expert_id;
+    bool is_speculative;
+    uint64_t generated_ns;
+    uint64_t push_ns;
+    uint64_t pop_ns;
+    uint64_t map_start_ns;
+    uint64_t map_end_ns;
+    uint64_t prefetch_start_ns;
+    uint64_t prefetch_end_ns;
+    uint64_t ready_ns;
+    uint64_t consumed_ns;
+};
+
+inline std::vector<PrefetchEvent> g_prefetch_events;
+inline std::mutex g_events_mutex;
+inline std::atomic<bool> g_enable_pipeline_logging{false};
+
+inline void log_prefetch_event(const PrefetchEvent& event) {
+    if (!g_enable_pipeline_logging.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(g_events_mutex);
+    if (g_prefetch_events.size() < 50000) {
+        g_prefetch_events.push_back(event);
+    }
+}
+
 #include "moe_api_common.h"
 
 class MOE_API ExpertCache {
@@ -38,8 +86,6 @@ public:
 
     /**
      * @brief Gets an expert's weights and pins it.
-     *        If not loaded, it will load it synchronously (Cache Miss).
-     *        If loading is in progress, it will block until completed.
      */
     ExpertEntry* get_and_pin(uint32_t expert_id, const std::string& filepath);
 
@@ -50,12 +96,17 @@ public:
 
     /**
      * @brief Asynchronously prefetches an expert. Called by the Prefetch Thread.
-     * @return true if mapping succeeded or was already mapped.
      */
-    bool prefetch_expert(uint32_t expert_id, const std::string& filepath);
+    bool prefetch_expert(uint32_t expert_id, const std::string& filepath,
+                         uint64_t pop_ns = 0, uint64_t gen_ns = 0, uint64_t push_ns = 0,
+                         uint32_t token_idx = 0, uint32_t layer_id = 0,
+                         bool is_speculative = false, uint32_t spec_dist = 0);
 
     // Eviction routine
     void evict_if_over_budget();
+
+    // Helper to log stats update
+    void record_access_stats(uint32_t expert_id);
 
     // Metrics getters
     uint64_t getHitCount() const { return hit_count_.load(std::memory_order_relaxed); }
@@ -79,6 +130,8 @@ private:
     
     std::unordered_map<uint32_t, ExpertEntry*> cache_map_;
     std::list<uint32_t> lru_list_; // Tracks expert_ids, head is MRU, tail is LRU
+
+    std::unordered_map<uint32_t, ExpertStats> stats_map_; // Track access metrics for Phase 3/4
 
     std::atomic<uint64_t> hit_count_;
     std::atomic<uint64_t> miss_count_;

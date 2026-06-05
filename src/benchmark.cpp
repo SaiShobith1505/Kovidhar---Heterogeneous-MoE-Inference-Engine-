@@ -163,6 +163,13 @@ ScenarioResult Benchmark::run_scenario(RoutingScenario scenario, const std::stri
             current_compute_token.store(t, std::memory_order_relaxed);
             current_compute_layer.store(l, std::memory_order_relaxed);
 
+#ifdef _WIN32
+            // Wake up router thread waiting on WaitOnAddress (current_compute_layer)
+            if (g_yield_strategy.load(std::memory_order_relaxed) == 4) {
+                WakeByAddressSingle(&current_compute_layer);
+            }
+#endif
+
             // 1. Determine which experts we route to
             uint32_t targets[2];
             get_routed_experts(t, l, config_.num_layers, config_.num_experts, scenario, targets);
@@ -173,6 +180,22 @@ ScenarioResult Benchmark::run_scenario(RoutingScenario scenario, const std::stri
 
             ExpertEntry* e0 = cache.get_and_pin(targets[0], "");
             ExpertEntry* e1 = cache.get_and_pin(targets[1], "");
+
+            // Phase 6: Expert Consumed (Timestamp 9)
+            uint64_t consumed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::high_resolution_clock::now().time_since_epoch()
+            ).count();
+
+            if (g_enable_pipeline_logging.load(std::memory_order_relaxed)) {
+                std::lock_guard<std::mutex> ev_lock(g_events_mutex);
+                for (auto& ev : g_prefetch_events) {
+                    if (ev.token_index == t && ev.layer_id == l && ev.consumed_ns == 0) {
+                        if (ev.expert_id == targets[0] || ev.expert_id == targets[1]) {
+                            ev.consumed_ns = consumed_ns;
+                        }
+                    }
+                }
+            }
 
             // 4. Force RAM read/page faulting to accurately measure SSD latency
             if (e0 && e0->mapped_ptr && e0->mapped_size > 0) {
@@ -207,6 +230,14 @@ ScenarioResult Benchmark::run_scenario(RoutingScenario scenario, const std::stri
             // 5. Unpin experts
             cache.unpin(targets[0]);
             cache.unpin(targets[1]);
+
+            // Phase 1: Adaptive Lookahead Controller Metrics Update
+            if (g_use_adaptive_lookahead.load(std::memory_order_relaxed)) {
+                uint64_t hits = cache.getHitCount();
+                uint64_t misses = cache.getMissCount();
+                double miss_rate = (hits + misses > 0) ? (double)misses / (hits + misses) : 0.0;
+                router.getAdaptiveController().update_metrics(miss_rate);
+            }
         }
     }
 

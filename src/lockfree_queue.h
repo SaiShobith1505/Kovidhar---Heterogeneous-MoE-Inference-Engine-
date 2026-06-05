@@ -30,6 +30,41 @@ inline void yield_processor() {
 #endif
 }
 
+inline std::atomic<int> g_yield_strategy{2}; // Default is Strategy C (YieldProcessor)
+
+inline void yield_strategy(int strategy) {
+    if (strategy == 0) {
+        // Strategy A: std::this_thread::sleep_for()
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    } else if (strategy == 1) {
+        // Strategy B: SwitchToThread() / sched_yield()
+#ifdef _WIN32
+        SwitchToThread();
+#else
+        std::this_thread::yield();
+#endif
+    } else if (strategy == 2) {
+        // Strategy C: YieldProcessor() / _mm_pause()
+        yield_processor();
+    } else if (strategy == 3) {
+        // Strategy D: Hybrid Spin + Yield
+        static thread_local int spin_count = 0;
+        if (spin_count++ < 1000) {
+            yield_processor();
+        } else {
+            spin_count = 0;
+#ifdef _WIN32
+            SwitchToThread();
+#else
+            std::this_thread::yield();
+#endif
+        }
+    } else {
+        // Strategy E (WaitOnAddress fallback/handled in the loop)
+        yield_processor();
+    }
+}
+
 template <typename T, size_t Capacity>
 class LockFreeSPSCQueue {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2 for fast masking");
@@ -61,6 +96,12 @@ public:
 
         ring_buffer_[current_head & (Capacity - 1)] = item;
         head_.store(current_head + 1, std::memory_order_release);
+
+#ifdef _WIN32
+        if (g_yield_strategy.load(std::memory_order_relaxed) == 4) {
+            WakeByAddressSingle(&head_);
+        }
+#endif
         return true;
     }
 
@@ -79,6 +120,12 @@ public:
 
         item = ring_buffer_[current_tail & (Capacity - 1)];
         tail_.store(current_tail + 1, std::memory_order_release);
+
+#ifdef _WIN32
+        if (g_yield_strategy.load(std::memory_order_relaxed) == 4) {
+            WakeByAddressSingle(&tail_);
+        }
+#endif
         return true;
     }
 
@@ -97,6 +144,12 @@ public:
     bool empty() const {
         return head_.load(std::memory_order_relaxed) == tail_.load(std::memory_order_relaxed);
     }
+
+    // Expose head/tail pointers and values for WaitOnAddress API
+    void* get_head_ptr() { return &head_; }
+    void* get_tail_ptr() { return &tail_; }
+    size_t get_head_val() const { return head_.load(std::memory_order_relaxed); }
+    size_t get_tail_val() const { return tail_.load(std::memory_order_relaxed); }
 
 private:
     // Align head and tail to 64-byte boundaries (standard L1 cache line size) to prevent false sharing

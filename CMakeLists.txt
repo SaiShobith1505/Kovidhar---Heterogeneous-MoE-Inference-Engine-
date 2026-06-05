@@ -44,31 +44,33 @@ endif()
 
 # Shared library target for the Python ctypes wrapper
 add_library(kovidhar SHARED
-    src/memory_manager.cpp
-    src/expert_cache.cpp
-    src/router_thread.cpp
-    src/prefetch_thread.cpp
-    src/benchmark.cpp
     src/inference_api.cpp
 )
 target_include_directories(kovidhar PUBLIC src)
 target_compile_definitions(kovidhar PRIVATE BUILDING_MOE_ENGINE)
 target_link_libraries(kovidhar PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 
+# Main executable target for the performance and optimization benchmark
+add_executable(moe_benchmark
+    src/main.cpp
+    src/memory_manager.cpp
+    src/expert_cache.cpp
+    src/router_thread.cpp
+    src/prefetch_thread.cpp
+    src/benchmark.cpp
+)
+target_include_directories(moe_benchmark PUBLIC src)
+target_compile_definitions(moe_benchmark PRIVATE BUILDING_MOE_ENGINE)
+target_link_libraries(moe_benchmark PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
 if(WIN32)
-    target_link_libraries(kovidhar PRIVATE ws2_32)
+    target_link_libraries(moe_benchmark PRIVATE ws2_32)
 endif()
 
 if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
-    target_include_directories(kovidhar PUBLIC ${ONNXRUNTIME_INCLUDE_DIR})
-    target_link_libraries(kovidhar PUBLIC ${ONNXRUNTIME_LIBRARY})
+    target_include_directories(moe_benchmark PUBLIC ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(moe_benchmark PUBLIC ${ONNXRUNTIME_LIBRARY})
 endif()
-
-# Main executable target for the performance benchmark
-add_executable(moe_benchmark
-    src/main.cpp
-)
-target_link_libraries(moe_benchmark PRIVATE kovidhar Threads::Threads)
 
 if(WIN32)
     # Copy ONNX Runtime and Vitis AI EP DLLs to build directory post-build
@@ -78,3 +80,4 @@ if(WIN32)
         $<TARGET_FILE_DIR:moe_benchmark>
     )
 endif()
+

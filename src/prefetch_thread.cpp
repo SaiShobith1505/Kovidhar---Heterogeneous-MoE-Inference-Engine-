@@ -49,15 +49,48 @@ void PrefetchThread::run() {
     PredictedExpertMessage msg;
 
     while (running_.load(std::memory_order_relaxed)) {
-        if (queue_.pop(msg)) {
+        bool pop_ok = false;
+        if (g_yield_strategy.load(std::memory_order_relaxed) == 4) {
+            pop_ok = queue_.pop(msg);
+            if (!pop_ok && running_.load(std::memory_order_relaxed)) {
+#ifdef _WIN32
+                // WaitOnAddress for new queue items
+                size_t head_val = queue_.get_head_val();
+                WaitOnAddress(queue_.get_head_ptr(), &head_val, sizeof(size_t), 1);
+#else
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+#endif
+            }
+        } else {
+            pop_ok = queue_.pop(msg);
+            if (!pop_ok && running_.load(std::memory_order_relaxed)) {
+                yield_strategy(g_yield_strategy.load(std::memory_order_relaxed));
+            }
+        }
+
+        if (pop_ok) {
+            // Phase 6: Queue Pop (Timestamp 3)
+            uint64_t pop_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::high_resolution_clock::now().time_since_epoch()
+            ).count();
+
             auto start_time = std::chrono::high_resolution_clock::now();
 
-            // Prefetch both experts predicted for the future layer
-            for (int k = 0; k < 2; ++k) {
+            // Prefetch enqueued candidates
+            for (uint32_t k = 0; k < msg.num_candidates; ++k) {
                 uint32_t expert_id = msg.top_k_experts[k];
                 
-                // Prefetch mapping (non-blocking in cache class if loaded, maps if missing)
-                cache_.prefetch_expert(expert_id, "");
+                cache_.prefetch_expert(
+                    expert_id, 
+                    "", 
+                    pop_ns, 
+                    msg.timestamp_ns, 
+                    msg.push_timestamp_ns,
+                    msg.token_index, 
+                    msg.layer_id, 
+                    msg.is_speculative, 
+                    msg.spec_distance
+                );
             }
 
             auto end_time = std::chrono::high_resolution_clock::now();
@@ -65,9 +98,6 @@ void PrefetchThread::run() {
             
             total_prefetch_time_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
             prefetch_count_.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            // SPSC Queue is empty. Yield or sleep briefly to avoid spinning CPU core.
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
         }
     }
 }

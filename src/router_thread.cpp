@@ -126,16 +126,28 @@ void RouterThread::run() {
         }
 
         // 1. Flow Control: Ensure the router thread does not outrun the compute pipeline too far.
-        // Limit lookahead to a maximum of 4 layers ahead of current execution.
         uint32_t comp_tok = current_compute_token_.load(std::memory_order_relaxed);
         uint32_t comp_lay = current_compute_layer_.load(std::memory_order_relaxed);
         
         int64_t compute_flat = static_cast<int64_t>(comp_tok) * num_layers_ + comp_lay;
         int64_t router_flat = static_cast<int64_t>(router_token) * num_layers_ + router_layer;
 
-        if (router_flat >= compute_flat + 4) {
-            // Sleep briefly to yield CPU
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        uint32_t lookahead_depth = g_use_adaptive_lookahead.load(std::memory_order_relaxed)
+            ? adaptive_controller_.get_current_depth()
+            : g_lookahead_depth.load(std::memory_order_relaxed);
+
+        if (router_flat >= compute_flat + lookahead_depth) {
+            if (g_yield_strategy.load(std::memory_order_relaxed) == 4) {
+#ifdef _WIN32
+                // WaitOnAddress for compute progress
+                uint32_t comp_lay_val = current_compute_layer_.load(std::memory_order_relaxed);
+                WaitOnAddress(&current_compute_layer_, &comp_lay_val, sizeof(uint32_t), 1);
+#else
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+#endif
+            } else {
+                yield_strategy(g_yield_strategy.load(std::memory_order_relaxed));
+            }
             continue;
         }
 
@@ -219,49 +231,87 @@ void RouterThread::run() {
         total_prediction_time_us_.fetch_add(elapsed_us, std::memory_order_relaxed);
         prediction_count_.fetch_add(1, std::memory_order_relaxed);
 
-        // 3. Expert Routing Selection logic based on Scenarios
+        // 3. Expert Routing Selection logic based on Scenarios and Candidate sizes
         PredictedExpertMessage msg;
         msg.token_index = router_token;
         msg.layer_id = router_layer;
+        msg.is_speculative = false;
+        msg.spec_distance = 0;
+
+        // Phase 6: Prediction Generated (Timestamp 1)
         msg.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch()
         ).count();
 
+        uint32_t num_cands = g_num_candidates.load(std::memory_order_relaxed);
+        msg.num_candidates = num_cands;
+
         if (scenario_ == RoutingScenario::HIGH_REUSE) {
-            // Highly concentrated reuse: only 2 experts per layer, cycling in a tiny set of 4 hot experts
-            msg.top_k_experts[0] = (router_layer * 2) % 4;
-            msg.top_k_experts[1] = (router_layer * 2 + 1) % 4;
-            msg.confidence_scores[0] = 0.7f;
-            msg.confidence_scores[1] = 0.3f;
+            for (uint32_t k = 0; k < num_cands; ++k) {
+                msg.top_k_experts[k] = (router_layer * num_cands + k) % 4; // Concentrated in first 4
+                msg.confidence_scores[k] = 1.0f / num_cands;
+            }
         } else if (scenario_ == RoutingScenario::WORST_CASE_CHURN) {
-            // Maximum churn: sequential traversal across all experts, forcing constant cache thrashing
-            msg.top_k_experts[0] = (router_flat * 2) % num_experts_;
-            msg.top_k_experts[1] = (router_flat * 2 + 1) % num_experts_;
-            msg.confidence_scores[0] = 0.6f;
-            msg.confidence_scores[1] = 0.4f;
+            for (uint32_t k = 0; k < num_cands; ++k) {
+                msg.top_k_experts[k] = (router_flat * num_cands + k) % num_experts_;
+                msg.confidence_scores[k] = 1.0f / num_cands;
+            }
         } else {
-            // Normal zipfian/skewed distribution
-            // Expert 0 to 15 are hotter, others are colder
+            // Zipfian distribution
             std::uniform_int_distribution<uint32_t> hot_dist(0, 15);
             std::uniform_int_distribution<uint32_t> cold_dist(16, num_experts_ - 1);
-            
-            // 80% chance of hot expert, 20% chance of cold expert
             std::uniform_int_distribution<uint32_t> prob(0, 99);
-            msg.top_k_experts[0] = (prob(gen) < 80) ? hot_dist(gen) : cold_dist(gen);
-            msg.top_k_experts[1] = (prob(gen) < 80) ? hot_dist(gen) : cold_dist(gen);
 
-            // Ensure distinct experts
-            if (msg.top_k_experts[0] == msg.top_k_experts[1]) {
-                msg.top_k_experts[1] = (msg.top_k_experts[1] + 1) % num_experts_;
+            for (uint32_t k = 0; k < num_cands; ++k) {
+                msg.top_k_experts[k] = (prob(gen) < 80) ? hot_dist(gen) : cold_dist(gen);
+                msg.confidence_scores[k] = 1.0f / num_cands;
             }
 
-            msg.confidence_scores[0] = 0.75f;
-            msg.confidence_scores[1] = 0.25f;
+            // Ensure distinct experts among candidates
+            for (uint32_t i = 0; i < num_cands; ++i) {
+                for (uint32_t j = i + 1; j < num_cands; ++j) {
+                    if (msg.top_k_experts[i] == msg.top_k_experts[j]) {
+                        msg.top_k_experts[j] = (msg.top_k_experts[j] + 1) % num_experts_;
+                    }
+                }
+            }
         }
 
-        // 4. Enqueue prediction message (Retry until queue has slot)
+        // Phase 6: Queue Push (Timestamp 2)
+        msg.push_timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::high_resolution_clock::now().time_since_epoch()
+        ).count();
+
+        // Enqueue prediction message (Retry until queue has slot)
         while (!queue_.push(msg) && running_.load(std::memory_order_relaxed)) {
-            yield_processor();
+            if (g_yield_strategy.load(std::memory_order_relaxed) == 4) {
+#pragma comment(lib, "Synchronization.lib")
+#ifdef _WIN32
+                size_t tail_val = queue_.get_tail_val();
+                WaitOnAddress(queue_.get_tail_ptr(), &tail_val, sizeof(size_t), 1);
+#else
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+#endif
+            } else {
+                yield_strategy(g_yield_strategy.load(std::memory_order_relaxed));
+            }
+        }
+
+        // Phase 7: Speculative Prefetch Validation
+        uint32_t spec_win = g_speculative_window.load(std::memory_order_relaxed);
+        if (spec_win > 0 && running_.load(std::memory_order_relaxed)) {
+            PredictedExpertMessage spec_msg = msg;
+            spec_msg.is_speculative = true;
+            spec_msg.spec_distance = spec_win;
+            spec_msg.layer_id = (router_layer + spec_win) % num_layers_;
+            spec_msg.token_index = router_token + (router_layer + spec_win) / num_layers_;
+            spec_msg.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::high_resolution_clock::now().time_since_epoch()
+            ).count();
+            spec_msg.push_timestamp_ns = spec_msg.timestamp_ns;
+
+            // Non-blocking speculative push. If queue is full, discard to protect performance.
+            queue_.push(spec_msg);
         }
 
         // Advance routing cursor

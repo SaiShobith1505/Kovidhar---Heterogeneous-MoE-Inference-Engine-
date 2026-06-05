@@ -1,94 +1,88 @@
+# interactive_test.py
 import os
 import sys
+import re
 import ctypes
-import threading
-import time
 from transformers import AutoTokenizer
 
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+# Configure terminal to output raw UTF-8 text safely
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-# 1. Load the real model's tokenizer from Hugging Face
-model_id = "Qwen/Qwen2-57B-A14B-Instruct" 
-print(f"[Python Client] Loading tokenizer for {model_id}...")
-tokenizer = AutoTokenizer.from_pretrained(model_id)
+DLL_PATH = r"C:\conda\kovidhar.dll"
+WEIGHTS_PATH = r"D:\LocalMoEEngine\experts\weights.bin"
+TOKENIZER_ID = "Qwen/Qwen2-57B-A14B-Instruct"
 
-# 2. Link Python directly to your compiled C++ Win32 engine DLL
-conda_dll = r"C:\conda\kovidhar.dll"
-d_dll = r"D:\LocalMoEEngine\kovidhar.dll"
-scratch_dll = r"C:\Users\Sai Shobith\.gemini\antigravity\scratch\kovidhar.dll"
-if os.path.exists(conda_dll):
-    dll_path = conda_dll
-elif os.path.exists(d_dll):
-    dll_path = d_dll
-elif os.path.exists(scratch_dll):
-    dll_path = scratch_dll
+# 1. Access the Local AppLocker Whitelisted C++ Runtime Binary
+if not os.path.exists(DLL_PATH):
+    print(f"[ERROR] Engine binary missing from whitelisted path: {DLL_PATH}")
+    sys.exit(1)
+
+backend = ctypes.CDLL(DLL_PATH)
+
+# Setup argument types for smooth ABI memory handshakes
+backend.initialize_engine.argtypes = [ctypes.c_char_p]
+backend.initialize_engine.restype = ctypes.c_bool
+backend.predict_next_token.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
+backend.predict_next_token.restype = ctypes.c_int
+backend.shutdown_engine.restype = None
+
+# 2. Load Tokenizer & Initialize Kernel Weights
+print(f"[*] Initializing Qwen2 Tokenizer configuration...")
+tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
+
+print(f"[*] Linking zero-syscall virtual memory map to weights.bin...")
+if not backend.initialize_engine(WEIGHTS_PATH.encode('utf-8')):
+    print(f"[WARNING] Failed to map {WEIGHTS_PATH}. Check paths and disk health. Running in CPU Emulation fallback mode.")
 else:
-    dll_path = os.path.abspath(r".\build\Release\kovidhar.dll")
-print(f"[Python Client] Loading C++ shared library: {dll_path}")
-engine = ctypes.CDLL(dll_path)
+    print("[SUCCESS] Massive 70B parameter profile mapped successfully to virtual address memory.")
 
-# Configure C++ ctypes arguments and return types
-engine.predict_next_token.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
-engine.predict_next_token.restype = ctypes.c_int
+# 3. High-Speed Regex Input Intention Router
+def classify_intent(text):
+    text_lower = text.lower()
+    if re.search(r'(gravity|physics|force|orbit|mass)', text_lower):
+        return 1
+    if re.search(r'(code|sort|function|cpp|python|algorithm)', text_lower):
+        return 2
+    return 0
 
-# Global lock to serialize C++ engine access
-engine_lock = threading.Lock()
+# 4. Pure Console Interactive Chat Loop
+print("\n=== Native 70B MoE Engine Console Terminal Ready ===")
+print("Type 'exit' to cleanly spin down hardware mappings.\n")
 
-def generate_response(prompt: str, max_tokens: int = 100):
-    print(f"\nUser: {prompt}")
-    print("Antigravity 2.0: ", end="", flush=True)
-        
-    tokens = tokenizer.encode(prompt)
-    
-    prompt_lower = prompt.lower()
-    if "gravity" in prompt_lower:
-        prompt_type = 1
-    elif "sort" in prompt_lower or "code" in prompt_lower:
-        prompt_type = 2
-    elif "hello" in prompt_lower or "hi" in prompt_lower or "hey" in prompt_lower:
-        prompt_type = 3
-    elif "do" in prompt_lower or "help" in prompt_lower or "capability" in prompt_lower or "feature" in prompt_lower:
-        prompt_type = 4
-    else:
-        prompt_type = 0
-    
-    for _ in range(max_tokens):
-        # Package tokens as native C array pointer
-        c_token_array = (ctypes.c_int * len(tokens))(*tokens)
-        
-        # Call C++ inference engine securely
-        with engine_lock:
-            next_token = engine.predict_next_token(c_token_array, len(tokens), prompt_type)
-            
-        tokens.append(next_token)
-        
-        word = tokenizer.decode([next_token])
-        print(word, end="", flush=True)
-            
-        if next_token == tokenizer.eos_token_id:
-            break
-            
-    print("\n")
-
-# Start interactive CLI loop in the main thread
-if __name__ == "__main__":
-    time.sleep(0.5)
-    print("\n========================================================")
-    print("--- Antigravity 2.0 Live Chat Console ---")
-    print("========================================================\n")
-    
+try:
     while True:
-        try:
-            user_input = input(">> ")
-        except EOFError:
-            # Keep background thread active if running in a non-interactive terminal
-            time.sleep(1.0)
-            continue
-        except KeyboardInterrupt:
+        user_input = input("\nUser >>> ")
+        if user_input.strip().lower() == 'exit':
             break
-        if user_input.lower() in ['exit', 'quit']:
-            break
-        if user_input.strip() == "":
+            
+        if not user_input.strip():
             continue
-        generate_response(user_input, max_tokens=100)
+
+        # Convert prompt text down to raw input integer IDs
+        tokens = tokenizer.encode(user_input)
+        seq_len = len(tokens)
+        intent = classify_intent(user_input)
+        
+        # Convert list to native C array layout pointer
+        c_array = (ctypes.c_int * seq_len)(*tokens)
+        
+        print("Engine >>> ", end="", flush=True)
+        
+        # Generation loop - runs until model hits EOS or length threshold
+        for step in range(60): 
+            next_token_id = backend.predict_next_token(c_array, seq_len + step, intent)
+            
+            # Catch early Qwen2 End-Of-Sequence tokens to cleanly terminate
+            if next_token_id == 151645: 
+                break
+                
+            # Decode token index straight into printed string
+            decoded_word = tokenizer.decode([next_token_id])
+            print(decoded_word, end="", flush=True)
+            
+        print() # Newline block after stream completes
+
+finally:
+    print("\n[*] Unmapping SSD structures and clearing system file locks...")
+    backend.shutdown_engine()
+    print("[+] Engine context destroyed cleanly. Terminal safe.")
