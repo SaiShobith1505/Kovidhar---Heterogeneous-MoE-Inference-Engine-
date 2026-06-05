@@ -50,7 +50,6 @@ add_library(kovidhar SHARED
     src/prefetch_thread.cpp
     src/benchmark.cpp
     src/inference_api.cpp
-    src/visualizer_server.cpp
 )
 target_include_directories(kovidhar PUBLIC src)
 target_compile_definitions(kovidhar PRIVATE BUILDING_MOE_ENGINE)
@@ -71,25 +70,11 @@ add_executable(moe_benchmark
 )
 target_link_libraries(moe_benchmark PRIVATE kovidhar Threads::Threads)
 
-# Visualizer server target
-add_executable(moe_visualizer_server
-    src/visualizer_server.cpp
-)
-target_compile_definitions(moe_visualizer_server PRIVATE BUILDING_MOE_ENGINE)
-target_link_libraries(moe_visualizer_server PRIVATE Threads::Threads)
-
 if(WIN32)
-    target_link_libraries(moe_visualizer_server PRIVATE ws2_32)
-    
     # Copy ONNX Runtime and Vitis AI EP DLLs to build directory post-build
     add_custom_command(TARGET moe_benchmark POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
         "C:/Program Files/RyzenAI/1.7.1/onnxruntime/bin"
         $<TARGET_FILE_DIR:moe_benchmark>
-    )
-    add_custom_command(TARGET moe_visualizer_server POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "C:/Program Files/RyzenAI/1.7.1/onnxruntime/bin"
-        $<TARGET_FILE_DIR:moe_visualizer_server>
     )
 endif()

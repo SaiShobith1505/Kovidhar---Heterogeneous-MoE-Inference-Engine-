@@ -32,36 +32,12 @@ engine = ctypes.CDLL(dll_path)
 engine.predict_next_token.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
 engine.predict_next_token.restype = ctypes.c_int
 
-engine.start_visualizer_server.argtypes = []
-engine.start_visualizer_server.restype = None
-
-engine.get_pending_prompt.argtypes = []
-engine.get_pending_prompt.restype = ctypes.c_char_p
-
-engine.send_generated_token.argtypes = [ctypes.c_char_p]
-engine.send_generated_token.restype = None
-
-engine.mark_chat_complete.argtypes = []
-engine.mark_chat_complete.restype = None
-
 # Global lock to serialize C++ engine access
 engine_lock = threading.Lock()
 
-def start_http_server():
-    print("[Python Client] Starting visualizer HTTP server on http://localhost:8082 in background...")
-    engine.start_visualizer_server()
-
-# Launch visualizer server in a background daemon thread
-server_thread = threading.Thread(target=start_http_server, daemon=True)
-server_thread.start()
-
-def generate_response(prompt: str, max_tokens: int = 50, to_browser: bool = False):
-    if not to_browser:
-        print(f"\nUser: {prompt}")
-        print("Antigravity 2.0: ", end="", flush=True)
-    else:
-        print(f"\nBrowser User: {prompt}")
-        print("Antigravity 2.0 (Web): ", end="", flush=True)
+def generate_response(prompt: str, max_tokens: int = 100):
+    print(f"\nUser: {prompt}")
+    print("Antigravity 2.0: ", end="", flush=True)
         
     tokens = tokenizer.encode(prompt)
     
@@ -89,39 +65,17 @@ def generate_response(prompt: str, max_tokens: int = 50, to_browser: bool = Fals
         
         word = tokenizer.decode([next_token])
         print(word, end="", flush=True)
-        
-        if to_browser:
-            # Send word to C++ server queue for browser SSE streaming
-            word_bytes = word.encode('utf-8', errors='replace')
-            engine.send_generated_token(word_bytes)
             
         if next_token == tokenizer.eos_token_id:
             break
             
     print("\n")
-    if to_browser:
-        engine.mark_chat_complete()
-
-# Background polling thread: listens for prompt requests sent from the browser interface
-def browser_prompt_listener():
-    while True:
-        prompt_bytes = engine.get_pending_prompt()
-        if prompt_bytes:
-            prompt = prompt_bytes.decode('utf-8', errors='replace')
-            # Generate the response and stream tokens to the browser
-            generate_response(prompt, max_tokens=100, to_browser=True)
-        else:
-            time.sleep(0.1)
-
-listener_thread = threading.Thread(target=browser_prompt_listener, daemon=True)
-listener_thread.start()
 
 # Start interactive CLI loop in the main thread
 if __name__ == "__main__":
-    time.sleep(1.0) # Wait for server startup messages to complete
+    time.sleep(0.5)
     print("\n========================================================")
     print("--- Antigravity 2.0 Live Chat Console ---")
-    print("Open http://localhost:8082 in your browser to view telemetry.")
     print("========================================================\n")
     
     while True:
@@ -137,4 +91,4 @@ if __name__ == "__main__":
             break
         if user_input.strip() == "":
             continue
-        generate_response(user_input, max_tokens=100, to_browser=False)
+        generate_response(user_input, max_tokens=100)

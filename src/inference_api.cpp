@@ -39,6 +39,9 @@ static std::atomic<uint64_t> g_total_miss_count{0};
 static std::atomic<uint64_t> g_total_hit_count{0};
 static auto g_inference_start_time = std::chrono::high_resolution_clock::now();
 
+// Define the global telemetry state
+EngineTelemetry g_telemetry;
+
 // Helper: Deterministic Embedding Lookup
 static std::vector<float> get_token_embedding(int token_id, int dim) {
     std::vector<float> emb(dim);
