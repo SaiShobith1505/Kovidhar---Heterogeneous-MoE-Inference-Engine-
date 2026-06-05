@@ -45,6 +45,7 @@ endif()
 # Shared library target for the Python ctypes wrapper
 add_library(kovidhar SHARED
     src/inference_api.cpp
+    src/real_inference.cpp
 )
 target_include_directories(kovidhar PUBLIC src)
 target_compile_definitions(kovidhar PRIVATE BUILDING_MOE_ENGINE)
